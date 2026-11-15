@@ -1,0 +1,30 @@
+---
+title: Event Loop
+description: How does Juptune's Event Loop work?
+---
+
+Juptune's event loop is currently pretty simplistic:
+
+* The event loop can support any number of `@gc` and `@nogc` threads; however threads currently have almost 0 capacity to interact with one another natively.
+
+* Each thread can have any number of fibers.
+
+* A thread will sleep if all of its fibers are currently waiting on io_uring to process pending operations.
+
+* A thread will automatically terminate if no fibers are running inside of it.
+
+* All Juptune I/O operations are coloured - they MUST be ran inside of a Juptune event loop fiber. This in turn colours any functions that rely on Juptune's I/O.
+
+    * In general most protocol implementations have no overly strict reliance on Juptune I/O beyond the API design of things like `TcpSocket`, so it _should_ be possible to use these implementations outside of Juptune's event loop as long as an adapter type is written.
+
+    * e.g. The TLS implementation is templated, so if given a Juptune `TcpSocket` it'll become Juptune coloured, but if given a non-Juptune-related `TcpSocket` (e.g. maybe an adapter around one for Vibe.d), then it won't become Juptune coloured.
+
+* Fibers can manually yield themselves as desired, however the event loop won't sleep with manually yielded fibers - it'll just start procesing them on its next iteration.
+
+    * (There's currently not `yieldSleep` function either, but I'm planning on writing one!)
+
+* There's some small considerations made in the Event Loop scheduler so that Fibers have a "fair chance" of running regularly, in an effort to prevent busy threads from processing "hot fibers" constantly, leaving "cold fibers" in the dust for ages.
+
+    * The scheduler needs a _lot_ of work.
+
+* While there is a `CancellationToken` type... it's not really used anywhere right now, but the intention is that it'll eventually be used everywhere.

@@ -1,0 +1,198 @@
+---
+title: Data Structures
+description: A reference page going over Juptune's basic data structures.
+---
+
+import { Aside } from "@astrojs/starlight/components"
+
+As Juptune is an `@nogc`-first library it needs to provide a basic set of data structures that can replace the `@gc` variants built into the language.
+
+This page largely covers the `juptune.core.ds` module - a lot of this code was written for a different, older project, and so some of the older code is... in need of modernising, to say the least.
+
+<Aside type="caution">Assume all data structures are NOT thread-safe unless explicitly stated.</Aside>
+
+## Strings
+
+The most used data structure within Juptune is definitely the `String` type.
+
+This string:
+
+* Is Immutable, it's data shouldn't change under normal circumstances, and it owns its data.
+* Is ref counted, so it's easy and (relatively) cheap to pass around.
+* Supports Small String Optimisation (SSO).
+    * (Certain functions can promote the string to the heap for safety reasons - it's all documented in the code).
+* Provides a flexible constructor that effectively acts as a `format` function.
+* The underlying buffer is always null terminated, for easier interaction with C libraries.
+
+### Construct with static string
+
+```d
+import juptune.core.ds : String;
+
+auto str = String("Hello, world!");
+```
+
+### Construct with a string builder pattern
+
+(At the moment, this copies the data found inside of the `Array!char` - I have aspirations to make it a zero-copy operation though.)
+
+```d
+import juptune.core.ds : Array, String;
+
+Array!char builder;
+builder.put("Hello, ");
+builder.put("World!");
+
+auto str = String.fromDestroyingArray(builder);
+
+// (As the name suggest, the builder gets destroyed as the String takes ownership of its memory).
+assert(builder.length == 0);
+```
+
+### Construct using different types
+
+Any type that's supported by `juptune.core.util.conv:toStringSink` can be fed into the String's constructor:
+
+```d
+import juptune.core.ds : String;
+
+struct Vector2i
+{
+    int x;
+    int y;
+}
+
+auto str = String("Your coordinates are: ", [Vector2i(0, 1), Vector2i(5, 10)], " - please don't resist!");
+```
+
+### Accesing the slice @safe-ly
+
+You can use the `.access` function to access the string as a `scope const(char)[]` within an `@safe` delegate - this'll help keep the peace of mind that you haven't accidentally escaped the slice outside of the String's lifetime:
+
+```d
+import juptune.core.ds : String;
+
+auto str = String("if you escape me the world will implode");
+
+str.access((scope const(char)[] slice) @safe {
+    // Do something with the slice, with the compiler giving you peace of mind.
+});
+```
+
+This also forcefully promotes the string onto the heap.
+
+### Accessing the slice as a range safely
+
+You can use `.range` to get an InputRange over the string's buffer. The returned InputRange will actually perform ref counting on the buffer as well, allowing safe usage of the string within range-based code.
+
+```d
+import std.algorithm   : map;
+import juptune.core.ds : String;
+
+auto str = String("if you escape me the world will implode");
+auto something = str.range.map!(ch => ch);
+
+// To drive the point home
+auto str2 = String("");
+auto str2Range = str2.range;
+str2.__xdtor();
+
+// str2Range is _still_ valid and safe to use, since it's ref counting the underlying buffer still.
+```
+
+### Accessing the slice less safely
+
+You can use `.slice` to get a direct slice of the underlying buffer (which is forcefully promoted to the heap).
+
+This is _relatively_ safe since the buffer can't resize due to the immutability design, however if the slice is kept around after the final instance of the String is dtored, then you'll hopefully crash instead of having memory corruption.
+
+```d
+import juptune.core.ds : String;
+
+auto str = String("if you escape me the world will implode");
+const(char)[] slice = str.slice;
+```
+
+### Accessing the slice very unsafely
+
+You can use `.sliceMaybeFromStack` to get a direct slice of the underlying buffer. However, this buffer may be on the stack if SSO is in effect.
+
+This should basically only be used if your usage of the slice is extremely short lived, because if the String is suddenly promoted while you have an active stack slice then you'll be facing stack corruption issues.
+
+The _only_ benefit of this method is that it doesn't automatically promote SSO strings into heap strings.
+
+```d
+import juptune.core.ds : String;
+
+auto str = String("if you escape me the world will implode");
+const(char)[] slice = str.sliceMaybeFromStack;
+```
+
+## SharedRefCount
+
+A thread-safe shared pointer. It's a little jank, and currently there's no thread-local version (or a unique pointer version):
+
+```d
+import juptune.core.ds      : SharedRefCount;
+import juptune.core.util    : Result, resultAssert;
+
+SharedRefCount!int safeInt;
+
+// (There's an `@gc` variant called `.makeGC`)
+safeInt.make((scope out value){
+    value = 21;
+    return Result.noError;
+}).resultAssert;
+
+// (There's an `@gc` variant called `.accessGC`)
+safeInt.access((scope ref shared value){
+    // Do something.
+    return Result.noError;
+}).resultAssert;
+```
+
+## Arrays
+
+There's honestly not much to say about this other than:
+
+* The contents of the array are not ref counted. Each copy of the array generates a copy of its data, like in C++.
+
+Beyond that it's a bog standard array type, just be careful using `.slice` when also modifying the array, since the underlying buffer may be reallocated.
+
+Arrays are also valid OutputRanges. `Array!char` can be useful for types that support the OutputRange style of `.toString`.
+
+```d
+import juptune.core.ds : Array;
+
+Array!int numbers;
+foreach(i; 0..1000)
+    numbers.put(i); // Or just: numbers ~= i;
+
+foreach(number; numbers.slice)
+    // Do something
+```
+
+This is an older type, so it has some strange outdated considerations and design decisions - it may be rewritten in the future.
+
+## HashMaps
+
+This is HashMap that uses Robin Hood Hashing (with backshift optimisation).
+
+This is an older type, so it has some strange outdated considerations and design decisions - it may be rewritten in the future.
+
+I'm not _entirely_ sure this is correctly implemented, which is exactly what one wants to hear. It honestly just needs to be rewritten.
+
+```d
+import juptune.core.ds : HashMap, String;
+
+HashMap!(String, int) strToNum;
+
+foreach(i; 0..1000)
+    strToNum[String(i)] = i;
+
+assert(strToNum[String("20")] == 20);
+```
+
+## MemoryBlockPool
+
+I never actually used this for what I intended it to be used for, but I just wanted to mention it exists if you spot it in the API docs.
