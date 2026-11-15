@@ -1,0 +1,208 @@
+---
+title: Getting Started
+description: Getting setup with Juptune.
+sidebar:
+    order: 0
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Briefly, Juptune is a library for the D programming language that focuses on providing `@nogc nothrow` implementations of common technologies and protocols, as well as an asynchronous multi-threaded event loop, for the ultimate purposes of being a batteries-included framework for building modern applications.
+
+This page details how to get started with Juptune, and getting a basic example project running.
+
+**Juptune is a Linux only library, sorry!**
+
+<Aside type='danger' >
+    Juptune is currently in **Alpha**, you WILL run into:
+
+    * Unimplemented parts of protocols that often trigger an `assert(false, "TODO")` crash.
+    * Massive API breakage between any given version.
+    * Growing pains all complex libraries and implementations of protocols have to go through.
+    * Security issues that currently make Juptune non-viable for serious projects.
+    * QoL and DX issues; oversights, and obvious use cases being missed.
+
+    **Please report any issues you run into!** Even if it's just "hey I keep running into this unimplemented code",
+    since that can let me figure out how to best spend my time.
+</Aside>
+
+## Required System Libraries
+
+Your system must have `libsodium >= 1.0.20` and `openssl/libcrypto >= 3.5.0` preinstalled.
+
+The `libsodium` dependency is pending removal in favour of going all in on `openssl/libcrypto`.
+
+## Installation
+
+<Aside type='note'>
+    Juptune only officially supports LDC. Version 1.43.0 and beyond should be fine.
+
+    Also shoutout to [redub](https://code.dlang.org/packages/redub) as a replacement to dub!
+</Aside>
+
+### Dub/redub
+
+<Steps>
+    1. Open your existing dub project, or create a new one, and run:
+    
+        ```bash
+        dub add juptune
+        ```
+
+    2. Use the following minimal code:
+
+        ```d title="app.d"
+        void main()
+        {
+            import juptune.event : EventLoop, EventLoopConfig;
+            auto loop = EventLoop(EventLoopConfig());
+            loop.addNoGCThread(() @nogc nothrow {});
+            loop.join();
+        }
+        ```
+
+    3. Run the program, and hopefully it doesn't crash:
+
+        ```bash
+        dub run
+        ```
+</Steps>
+
+### Meson (Global Install with pkgconfig)
+
+<Steps>
+    1. Clone the repo (and optionally switch to a specific tag):
+    
+        ```bash
+        git clone https://github.com/Juptune/juptune
+        ```
+
+    2. Setup a Meson build folder, with most of the optional stuff turned off:
+    
+        ```bash
+        meson setup build --buildtype=release -Ddefault_library=static -Dbuild-unittests=false -Dbuild-integration-tests=false -Dbuild-examples=false -Dbuild-dasn1=false -Dbuild-dx509=false
+        ```
+
+    3. Run the following to install Juptune & its pkgconfig file globally:
+
+        ```bash
+        meson install -C build
+
+        # (On some systems you'll need to do this instead)
+        cd ./build
+        ninja install # Potentially needs `sudo`
+        ```
+
+    4. (To undo the above installation):
+
+        ```bash
+        meson uninstall -C build
+
+        # (On some systems you'll need to do this instead)
+        cd ./build
+        ninja uninstall # Potentially needs `sudo`
+        ```
+
+    5. In your Meson project, include Juptune as a dependency (it'll be found via pkgconfig):
+
+        ```python title="meson.build"
+        #### Project configuration ####
+
+        project('basic-meson-project', 'd')
+
+        #### Sources ####
+
+        srcs = files(
+            './src/main.d',
+        )
+
+        #### Dependencies ####
+
+        juptune_dep = dependency('juptune')
+
+        dep = declare_dependency(
+            include_directories: include_directories('src'),
+            sources: srcs,
+            dependencies: [juptune_dep],
+        )
+
+        #### Executables ####
+
+        main_exe = executable('basic-meson-project', dependencies: [dep], install: true)
+        test_exe = executable('unittests', dependencies: [dep], d_unittest: true)
+
+        #### Tests ####
+
+        test('unittests', test_exe)
+        ```
+
+    6. Use the following minimal code that'll be used to test that your setup works:
+
+        ```d title="main.d"
+        void main()
+        {
+            import juptune.event : EventLoop, EventLoopConfig;
+            auto loop = EventLoop(EventLoopConfig());
+            loop.addNoGCThread(() @nogc nothrow {});
+            loop.join();
+        }
+        ```
+
+    7. Run the following commands and pray no errors show up:
+    
+        ```bash
+        meson setup build --buildtype debug
+        meson compile -C build
+        ./build/basic-meson-project
+        ```
+</Steps>
+
+## Larger Example Code
+
+Here's a larger piece of example code to run locally, to definitely make sure Juptune is running well on your system:
+
+```d
+import juptune.core.util : Result, resultAssert;
+import juptune.dns       : dnsLookupIp;
+import juptune.event     : EventLoop, EventLoopConfig, IpAddress;
+import juptune.http      : HttpClient, HttpClientConfig, HttpRequest, HttpResponse;
+
+void main()
+{
+    auto loop = EventLoop(EventLoopConfig());
+    loop.addNoGCThread(() @nogc nothrow {
+        /** 
+            This is still really bulky since some stuff is still TODO, 
+            e.g. HttpClient supporting DNS lookups natively; simpler GET and POST interface, etc. 
+        **/
+        IpAddress ip;
+        dnsLookupIp("forum.dlang.org", ip).resultAssert;
+
+        auto client = HttpClient(HttpClientConfig());
+        client.connectTls(ip, "forum.dlang.org").resultAssert;
+
+        HttpRequest req;
+        req.withPath("/");
+        req.withMethod("GET");
+
+        HttpResponse res;
+        client.request(req, res).resultAssert;
+
+        import core.stdc.stdio : printf;
+        printf("%d %s: Received %lld bytes from forum.dlang.org!", res.status, res.reason.slice.ptr, res.body.length);
+    });
+    loop.join();
+}
+```
+
+## Next Steps
+
+Since Juptune is in alpha I've refrained from writing extensive "here's some ideas you can try" guides as they'll become
+outdated very quickly.
+
+Instead, please review:
+
+* The existing [examples](https://github.com/Juptune/juptune/tree/master/examples).
+* The autogenerated [API documentation]() (TODO).
+* Start having a look over the hand-written Reference section - which you can find on the sidebar of this site - to get an idea of
+all the bells and whistles provided by Juptune.

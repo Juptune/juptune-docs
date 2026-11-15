@@ -1,0 +1,266 @@
+---
+title: Error Handling
+description: How error handling is handled in Juptune.
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+As Juptune is an `@nogc nothrow` library at heart, we cannot utilise D's native capacity for throwing exception.
+
+Instead, Juptune opts to use a `Result` type that most functions will return, which contains mostly-type-safe error codes; a statically allocated error message, and optionally a dynamically allocated additional context for the error.
+
+This pattern is somewhere between how C and Go typically handles errors (leaning more towards Go).
+
+## Quirks
+
+### @mustuse
+
+The `Result` type has the `@mustuse` attribute attached onto it, meaning the compiler will yell at you if you forget to
+capture or do anything when a function returns a `Result`:
+
+```d del={7} ins={12,19}
+import juptune.core.util : Result;
+
+Result dummyFunc() => Result.noError;
+
+void badFunc()
+{
+    dummyFunc(); // Compiler will error since the Result isn't "used"
+}
+
+void goodFunc()
+{
+    auto result = dummyFunc(); // Compiler won't error since the Result is "used"
+}
+
+void otherGoodFunc()
+{
+    import juptune.core.util : resultAssert;
+
+    dummyFunc().resultAssert; // Ditto
+}
+```
+
+### No default constructor
+
+`Result` is intended to always have an explicit value, whether that's "no error" or "some kind of error".
+
+Default construction for Results has been disabled to achieve that design decision.
+
+You can use `Result.noError` to initialise Results.
+
+```d del={3} ins={5}
+import juptune.core.util : Result;
+
+Result thisWillError; // Compiler will error due to default construction being disabled.
+
+Result thisWontError = Result.noError; // This is fine.
+```
+
+## Creating Errors
+
+<Steps>
+    1. Define an enum containing any error codes to whatever level of granularity you'd like, for example here's the one for UriError:
+
+        ```d
+        /// `Result` error enum
+        enum UriError
+        {
+            none,
+            schemeIsInvalid,            /// Scheme exists, but is invalid
+            authorityRequired,          /// URI is absolute (has a scheme), but has no authority component
+            authorityUserInfoIsInvalid, /// User info exists, but is invalid
+            authorityPortIsInvalid,     /// Port exists, but is invalid
+            authorityHostIsInvalid,     /// Host exists, but is invalid
+            pathIsInvalid,              /// Path exists, but is invalid
+            queryIsInvalid,             /// Query exists, but is invalid
+            fragmentIsInvalid,          /// Fragment exists, but is invalid
+        }
+        ```
+    
+    2. Call `Result.make` - passing it a specific error code as well as a static string for its general error message:
+
+        ```d
+        import juptune.core.util : Result;
+
+        enum UriError { ... }
+
+        Result myCustomUriParser()
+        {
+            return Result.make(
+                UriError.schemeIsInvalid, 
+                "input URI has a malformed scheme (invalid characters?)"
+            );
+        }
+        ```
+
+    3. Optionally you can provide a `String` as a third parameter for providing dynamically allocated info on the error:
+
+        ```d {12}
+        import juptune.core.ds   : String;
+        import juptune.core.util : Result;
+
+        enum UriError { ... }
+
+        Result myCustomUriParser()
+        {
+            const scheme = "http$";
+            return Result.make(
+                UriError.schemeIsInvalid, 
+                "input URI has a malformed scheme (invalid characters?)",
+                String("scheme was: '", scheme, "' which contains invalid character: ", scheme[$-1])
+            );
+        }
+        ```
+</Steps>
+
+It's recommended to always have a `.none` or `.FAILSAFE` as the default value of your error enum.
+
+## Handling Errors
+
+The following examples will make use of the [uriParseNoCopy]() function.
+
+### Propagation
+
+The easiest way to handle errors is to simply propagate them further up the call chain:
+
+```d "return result;" "return r;"
+import juptune.core.util : Result;
+import juptune.http      : Uri, uriParseNoCopy;
+
+Result myFunction() @nogc nothrow
+{
+    Uri uri;
+
+    Result result = uriParseNoCopy("!invalid!uri!", uri);
+    if(result.isError)
+        return result;
+
+    // (More concise version)
+    if(auto r = uriParseNoCopy("!invalid!uri!", uri))
+        return r;
+
+    return Result.noError;
+}
+```
+
+### Propagation with more context
+
+You can easily add additional context when propagating error results, this is inspired by a common pattern found in Go:
+
+```d /wrapError.+/
+import juptune.core.util : Result;
+import juptune.http      : Uri, uriParseNoCopy;
+
+Result myFunction() @nogc nothrow
+{
+    Uri uri;
+
+    Result result = uriParseNoCopy("!invalid!uri!", uri);
+    if(result.isError)
+        return result.wrapError("when calling myFunction:");
+
+    return Result.noError;
+}
+```
+
+This is essentially a poor-man's stack trace. This also allocates memory since the old error message gets moved into `Result.context` (which'll be freed once the Result's dtor runs).
+
+### Handle specific errors
+
+The error code within a `Result` has type info attached to it, and so it's possible to determine between different error enums share the same numeric value:
+
+```d {11-14}
+import juptune.core.util : Result;
+import juptune.http      : Uri, UriError, uriParseNoCopy;
+
+Result myFunction() @nogc nothrow
+{
+    Uri uri;
+
+    Result result = uriParseNoCopy("https://example.org/#!£$*()'", uri);
+    if(result.isError)
+    {
+        if(result.isError(UriError.fragmentIsInvalid))
+        {
+            // Do something different.
+        }
+        else
+            return result; // Unhandled errors just get propagated
+    }
+
+    return Result.noError;
+}
+```
+
+### Handle errors of a specific type
+
+Similarly to above, there may be cases where you may want to treat errors of a specific type differently (regardless of the numeric error code):
+
+```d "isErrorType!UriError"
+import juptune.core.util : Result;
+import juptune.http      : Uri, UriError, uriParseNoCopy;
+
+Result myFunction() @nogc nothrow
+{
+    Uri uri;
+
+    Result result = uriParseNoCopy("https://example.org/#!£$*()'", uri);
+    if(result.isError)
+    {
+        if(result.isErrorType!UriError)
+        {
+            // Do something different for any UriError.
+        }
+        else
+            return result; // Unhandled errors just get propagated
+    }
+
+    return Result.noError;
+}
+```
+
+### Assert/Enforce a result is not an error
+
+If you'd like an easy, concise way of triggering an assert (or throwing an exception in `@gc` code) if a result is errorful, then there's two helper functions for this:
+
+```d "resultAssert" "resultEnforce"
+import juptune.core.util : resultAssert, resultEnforce;
+import juptune.http      : Uri, uriParseNoCopy;
+
+void myFunction() @nogc nothrow
+{
+    // Triggers an assert (crashing the program) if the result is an error.
+    Uri uri;
+    uriParseNoCopy("https://example.org/#!£$*()'", uri).resultAssert;
+}
+
+void myFunctionGc()
+{
+    // Throws an exception if the result is an error.
+    Uri uri;
+    uriParseNoCopy("https://example.org/#!£$*()'", uri).resultEnforce;
+}
+```
+
+This is similar to Go's "MustXXX" pattern.
+
+## Other
+
+### Lightweight results
+
+By default the `Result` struct is actually pretty heavy:
+
+* It's fairly large for a by-value type due to it carrying a bunch of info.
+* The dynamically allocated context is stored as a `String`, meaning that the type has a copy-ctor and a dtor.
+
+This shouldn't be an issue or a major enough bottleneck in most cases. However, if you'd like a much more lightweight version of the `Result` type then you can specify the following versions when compiling:
+
+* `Juptune_Result_NoLineInfo` - Removes: Filename; module name; function name; and line of where the Result was generated.
+    * These are replaced by stub functions that simply return the appropriate `.init` value.
+    * This option reduces the struct's size by about 56 bytes.
+* `Juptune_Result_NoContext` - Removes: The dynamically allocated context string.
+    * This field is replaced by a stub function that simply returns `String.init`.
+    * This option removes the need for the expensive part of the copy-ctor and general need of a dtor.
+
+The above versions can be enabled in Meson by adding the following flag when calling `meson setup` when manually compiling Juptune itself: `-Dlightweight-results=true`
