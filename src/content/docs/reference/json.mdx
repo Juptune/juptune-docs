@@ -1,0 +1,418 @@
+---
+title: JSON
+description: A reference page going over Juptune's JSON functions.
+---
+
+import { Steps } from "@astrojs/starlight/components"
+
+Juptune provides:
+
+* A low-level zero-copy JSON builder.
+* A low-level zero-copy JSON parser.
+* A high-level JSON (de)serialiser built on the above (which also supports `@gc` types).
+
+It's recommended to read the documentation comments for [jsonSerialise]() (TODO); [jsonDeserialise]() (TODO);
+[JsonBuilder]() (TODO), and [JsonParser]() (TODO), to get more exact specifics on things like supported types.
+
+## Limitations
+
+### Depth
+
+(This applies to the low-level API and the high-level API all the same).
+
+The low-level builder and parser need to keep track of depth in order to provide both validation, and correct output.
+
+e.g. They have to know whether they're currently inside an array or object, and whether the parent is an array, object, or the root level.
+
+This is achieved by passing a statically allocated depth buffer into these types. Each byte in the depth buffer allows for 8 levels of nesting.
+
+This is actually beneficial from a security perspective, since it can place a hard limit on depth for untrusted sources of data.
+
+However, it _may_ get in the way for certain specialised cases where deep (and I mean **deep**) nesting comes into play.
+
+For reference, a `ubyte[8]` static depth buffer can provide 64 levels of nesting, which should be enough for most cases.
+
+### UTF-16 surrogates
+
+JSON allows for the usage of UTF-16 surrogates when encoding data.
+
+This is... annoying to deal with, so Juptune currently doesn't output or parse UTF-16 surrogates.
+
+### Top level is an object or array only
+
+Due to the design of both low-level APIs, the top-level value can only ever be an array or an object.
+
+### Allows for duplicate entries
+
+**Currently** the high-level deserialiser does not keep track of whether a field is duplicated or not. This'll be fixed, I just haven't put the time into it yet.
+
+The last duplicate field is the one that'll get used.
+
+(The low-level API probably will never bother with this though).
+
+### Unknown fields are always disallowed
+
+**Currently** the high-level deserialiser will error out if an unexpected field is encountered when deserialising a struct.
+
+I'd like to make this configurable at some point.
+
+### Floats are unsupported
+
+Since Juptune in general completely lacks facilities for converting floats to/from text, floats aren't really supported.
+
+This'll be fixed once I finally put the effort into float \<-> string conversion.
+
+## Serialiser
+
+### Basics
+
+Juptune will only look at fields that are explicitly marked with the `@Json` UDA. This UDA is also used to control per-field configuration.
+
+This can definitely be made easier to use with some helper functions, but those don't exist yet.
+
+<Steps>
+    1. Define a type and mark its fields with `@Json` as desired.
+
+        ```d
+        import std.typecons     : Nullable;
+        import juptune.core.ds  : String, Array;
+        import juptune.json     : Json;
+
+        struct AThing
+        {
+            // (You can use a normal D string when working in `@gc` code)
+            @Json
+            String name;
+
+            @Json(name: "thingAge")
+            Nullable!int age;
+
+            // (You can use a normal D slice when working in `@gc` code)
+            @Json(omitWhenEmpty: true)
+            Array!int values;
+        }
+        ```
+
+    2. Serialise the type (TODO: This desparately needs high-level helper functions):
+
+        ```d
+        import std.typecons      : Nullable;
+        import juptune.core.ds   : String, Array;
+        import juptune.core.util : resultAssert;
+        import juptune.json      : JsonBuilder, jsonSerialise;
+
+        struct AThing { ... }
+
+        void serialised()
+        {
+            // (Juptune has no easy-to-use @nogc logging yet)
+            import std.stdio : writeln;
+
+            /**** Setup a low-level builder that we'll serialise into ****/
+
+            Array!char buffer;
+            scope append = (scope const char[] ch){
+                buffer.put(ch);
+                return Result.noError;
+            };
+            ubyte[8] depth;
+            auto json = JsonBuilder!(typeof(append))(append, depth[]);
+
+            /**** Serialise into the builder ****/
+
+            AThing thing;
+            thing.name  = String("water monitor");
+            thing.age   = Nullable!int.init; // null
+            thing.values.put(20);
+
+            jsonSerialise(json, AThing()).resultAssert;
+            json.finish().resultAssert;
+
+            /**** Print out the result ****/
+            writeln(buffer.slice);
+        }
+        ```
+
+    3. This'll produce the following (manually formatted) JSON:
+
+        ```json
+        {
+            "name": "water monitor",
+            "thingAge": null,
+            "values": [20]
+        }
+        ```
+
+    4. We can then deserialise this (TODO: This less desparately needs high-level helper functions):
+
+        ```d
+        import juptune.core.util : resultAssert;
+        import juptune.json      : JsonParser, jsonDeserialise;
+
+        struct AThing { ... }
+
+        void deserialised()
+        {
+            const input = `{"name":"water monitor","thingAge":null,"values":[20]}`;
+
+            /**** Setup a parser ****/
+
+            ubyte[8] depthBuffer;
+            auto parser = JsonParser(input, depthBuffer[]);
+
+            /**** Parse into our struct ****/
+
+            AThing thing;
+            jsonDeserialise(parser, thing).resultAssert;
+            parser.finish().resultAssert;
+
+            /**** Validate ****/
+
+            assert(thing.name == "water monitor");
+            assert(thing.age.isNull);
+            assert(thing.values.slice == [20]);
+        }
+        ```
+</Steps>
+
+### Option - name
+
+By default, the name of the symbol within D is used as the name when serialising/deserialising the field.
+
+Without this option:
+
+```d
+struct S 
+{
+    @Json int myField;
+}
+
+S(0) becomes {"myField":0}
+```
+
+With this option:
+
+```d
+struct S 
+{
+    @Json(name: "someOtherField") int myField;
+}
+
+S(0) becomes {"someOtherField":0}
+```
+
+### Option - omitWhenEmpty
+
+By default, if an `Array` or slice have a length of 0, then it'll just be outputted as an empty JSON array.
+
+This option allows the field to be completely omitted instead.
+
+(This option technically works for any type that has a `.length`!)
+
+Without this option:
+
+```d
+struct S 
+{
+    @Json int[] field;
+}
+
+S([]) becomes {"field":[]}
+```
+
+With this option:
+
+```d
+struct S 
+{
+    @Json(omitWhenEmpty: true) int[] field;
+}
+
+S([]) becomes {}
+```
+
+### Option - omitWhenNull
+
+By default, if an array `is null` or a `Nullable` field is `.isNull`, it'll be outputted as a JSON `null`.
+
+This option allows the field to be completely omitted instead.
+
+(This option technically works for any type that has a `.isNull`!)
+
+Without this option:
+
+```d
+struct S 
+{
+    @Json int[]        array;
+    @Json Nullable!int nullable;
+}
+
+S([], Nullable!int.init) becomes {"array":null,"nullable":null}
+```
+
+With this option:
+
+```d
+struct S 
+{
+    @Json(omitWhenNull: true) int[]        array;
+    @Json(omitWhenNull: true) Nullable!int nullable;
+}
+
+S([], Nullable!int.init) becomes {}
+```
+
+### Option - useNullForOmit
+
+By default, if a field is omitted by one of the `omitWhen` flags then it'll be completely omitted from the output.
+
+This option allows the field to be omitted as `null` instead.
+
+This can be really useful for custom types that need to be given `null` support, e.g. a `CustomNullable` type with a `.isNull` field can be given the `omitWhenNull` and `useNullForOmit` flags to support null... in a roundabout way.
+
+```d
+struct S 
+{
+    @Json int[] array;
+}
+
+S([]) becomes {"array":[]}
+```
+
+With this option:
+
+```d
+struct S 
+{
+    @Json(omitWhenEmpty: true, useNullForOmit: true) int[] array;
+}
+
+S([]) becomes {"array":null}
+```
+
+## JsonBuilder
+
+This is a low-level, zero-copy interface for encoding JSON.
+
+It relies on passing slices of input data as well as static strings to an external sink provided by the caller, so the caller is in control of how the encoded JSON is handled.
+
+<Steps>
+    1. To start with, the JsonBuilder needs a depth buffer and a sink provided to it. Here's an example of an `@nogc` sink:
+
+        ```d
+        import juptune.core.ds   : Array;
+        import juptune.core.util : Result;
+        import juptune.json      : JsonBuilder;
+
+        ubyte[8] depth;
+        Array!char buffer;
+        scope append = (scope const char[] ch){
+            buffer.put(ch);
+            return Result.noError;
+        };
+
+        auto json = JsonBuilder!(typeof(append))(append, depth[]);
+        ```
+
+    2. You can then begin to construct your JSON value. The top-level value must always be an array or object:
+        ```d
+        // (`with` blocks can make things less verbose)
+        with(json)
+        {
+            startObject().resultAssert;
+            
+            putObjectValue("level", "ERROR").resultAssert;
+            putObjectValue("isError", true).resultAssert;
+
+            startObject("🎂 ⋆ 𝒹𝑒𝒷𝓊𝑔 ⋆ 🎂").resultAssert;
+                putObjectValue("line", 20).resultAssert;
+                putObjectValue("column", 50).resultAssert;
+                startArray("module").resultAssert;
+                    putArrayValue("juptune").resultAssert;
+                    putArrayValue("json").resultAssert;
+                    putArrayValue("example").resultAssert;
+                endArray().resultAssert;
+            endObject().resultAssert;
+            
+            endObject().resultAssert;
+        }
+        ```
+
+    3. You must then let the builder know you've finished, so it can perform some final validation:
+        ```d
+        json.finish().resultAssert;
+        ```
+
+    4. In our `@nogc` sink case, our `buffer` Array will now have the fully encoded output in it.
+</Steps>
+
+## JsonParser
+
+This is a low-level, zero-copy interface for decoding JSON.
+
+Zero-copy is achieved by passing tokens back to the caller, which describes what part of the JSON input was just parsed, as well as provide a direct slice of the input that was parsed.
+
+Tokens provide helper functions to perform more useful processing, e.g. `JsonParser.Token.asEscapedString` produces an InputRange that handles escaping JSON strings properly; since otherwise the returned input slice is still unescaped.
+
+<Steps>
+    1. To start with, the JsonParser just needs a depth buffer and its input:
+
+        ```d
+        import juptune.core.util : Result;
+        import juptune.json      : JsonParser;
+
+        ubyte[8] depth;
+        const input = `{"some": "object"}`;
+        auto json = JsonParser(input, depth[]);
+        ```
+
+    2. Then you need to keep calling `.next` until you've fully parsed the top-level object/array:
+        ```d
+        size_t depth = 0;
+        do {
+            JsonParser.Token token;
+            json.next(token).resultAssert;
+
+            final switch(token.type) with(JsonParser.Token.Type)
+            {
+                case FAILSAFE: assert(false);
+
+                case arrayStart:
+                case objectStart:
+                    depth++;
+                    // (and maybe other processing)
+                    break;
+
+                case arrayEnd:
+                case objectEnd:
+                    depth--;
+                    // (and maybe other processing)
+                    break;
+
+                case boolean:
+                    const value = token.asBool;
+                    // ...
+
+                case name:
+                case string:
+                    if(token.hasEscapeChars)
+                        // Slow path using `token.asEscapedString`
+                    else
+                        // Fast path using `token.asUnescapedString`
+                    // ...
+
+                case integer:
+                    const value = token.asInt!uint;
+                    // ...
+
+                // Yada yada for the remaining token types...
+            }
+        } while(depth > 0);
+        ```
+
+    3. You must then let the parser know you've finished, so it can perform some final validation:
+        ```d
+        json.finish().resultAssert;
+        ```
+</Steps>
