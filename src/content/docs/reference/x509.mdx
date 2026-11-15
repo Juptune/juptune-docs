@@ -1,0 +1,23 @@
+---
+title: X.509
+description: A reference page going over Juptune's X.509 functions.
+---
+
+import { Aside } from "@astrojs/starlight/components"
+
+Juptune provides a native X.509 certificate parser. It's not fully complete, and the validation isn't full there yet, but the growing pains will hopefully subside.
+
+TODO: Most people won't be touching this code, so not a priority to document it immediately.
+
+## Default Certificate Store
+
+<Aside type="danger">
+    Any certificate in the bundle that fails to parse is silently discarded, this can lead to confusing errors about missing root certificates.
+
+    Feel free to raise an issue with any specific certificate PEMs that are failing so I can eventually look into the decoding error (they're such a PITA though)!
+</Aside>
+
+Juptune will attempt to load the default CA bundle from one of these file paths, using the first file that exists:
+
+* /etc/ssl/ca-bundle.pem
+* /etc/ssl/certs/ca-certificates.crt

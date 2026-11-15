@@ -248,7 +248,7 @@ struct S
     @Json Nullable!int nullable;
 }
 
-S([], Nullable!int.init) becomes {"array":null,"nullable":null}
+S(null, Nullable!int.init) becomes {"array":null,"nullable":null}
 ```
 
 With this option:
@@ -260,7 +260,7 @@ struct S
     @Json(omitWhenNull: true) Nullable!int nullable;
 }
 
-S([], Nullable!int.init) becomes {}
+S(null, Nullable!int.init) becomes {}
 ```
 
 ### Option - useNullForOmit
