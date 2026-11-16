@@ -4,6 +4,8 @@ import starlight from '@astrojs/starlight';
 
 // https://astro.build/config
 export default defineConfig({
+	site: 'https://juptune.github.io/',
+	base: '/juptune-docs',
 	integrations: [
 		starlight({
 			title: 'Juptune',
