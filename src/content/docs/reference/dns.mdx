@@ -1,0 +1,256 @@
+---
+title: DNS
+description: A reference page going over Juptune's DNS functions.
+---
+
+Juptune provides a native DNS client implementation, namely so that DNS lookups are natively integrated within its event loop.
+
+## Nameserver sources
+
+`dnsLookupIp` is the main, easy-to-use function for performing a DNS lookup.
+
+Currently it is not possible to programatically add nameservers to its list, since it'll instead try to source it from the file system.
+
+### /etc/resolv.conf
+
+The first time `dnsLookupIp` is called it'll try to load nameservers in from `/etc/resolv.conf` - these settings are then used for the remaining lifetime of the application.
+
+Juptune currently only supports `nameserver` directives, all other directives are ignored.
+
+At this point in time all nameservers sourced from `resolv.conf` will only ever use the RFC 1035 client.
+
+## Transports
+
+DNS has several different transport protocols:
+
+* The original UDP-based one described by RFC 1035 (with a later TCP extension).
+* DNS-over-TLS
+* DNS-over-HTTPS
+
+Currently only the UDP+TCP transport has been implemented (referred to as the "RFC 1035 client" within the codebase).
+
+The others _should_ be easy to add in, I just haven't gotten around to it yet.
+
+## Performing a lookup (the simple way)
+
+The easiest way to perform a lookup is to use the aforementioned `dnsLookupIp` function:
+
+```d
+import juptune.dns      : dnsLookupIp;
+import juptune.event    : IpAddress;
+
+IpAddress ip;
+auto result = dnsLookupIp("forum.dlang.org", ip);
+if(result.isError)
+    // (Failed to lookup)
+
+// (Successfully looked up, so let's add a port onto the IP for future usage)
+ip.port = 443;
+```
+
+All nameservers will be tried one-by-one until we get a response. The lookup will stop regardless of whether the response was a success or a failure, as additional nameservers should only be used for redunancy.
+
+### IPv6
+
+By default `dnsLookupIp` only looks up `A` records, which contain IPv4 addresses.
+
+You can tell it to instead look for `AAAA` records, which are for IPv6 addresses:
+
+```d "IpAddress.Kind.ipv6"
+import juptune.dns      : dnsLookupIp;
+import juptune.event    : IpAddress;
+
+IpAddress ip;
+auto result = dnsLookupIp("forum.dlang.org", ip, IpAddress.Kind.ipv6);
+if(result.isError)
+    // (Failed to lookup)
+
+// (Successfully looked up, so let's add a port onto the IP for future usage)
+ip.port = 443;
+```
+
+Currently there's no way to tell it to automatically lookup both, though that's just due to a lack of effort on my part.
+
+## Performing a lookup (the manual way)
+
+The individual transport implementations are freely available for use, though they're more complicated than just using `dnsLookupIp` as these transports can be used to perform _any_ kind of DNS query.
+
+### Encoding a query
+
+Before using any form of transport, the query must first be encoded into a caller-provided buffer.
+
+Here's a modified example from the `dnsLookupIp`'s code. It's recommended to read the documentation for [dnsEncodeQuery]() (and probably RFC 1035 in general) as it provides a large level of flexiblity for forming a query:
+
+```d
+import juptune.data  : MemoryWriter;
+
+import juptune.dns 
+    : 
+        DnsRecordType, 
+        DnsRecordClass,
+        DnsHeaderOpcode, 
+        dnsEncodeQuery, 
+        DNS_RFC1035_MIN_BUFFER_SIZE, 
+        DNS_RFC1035_RECOMMENDED_BUFFER_SIZE
+    ;
+
+ubyte[DNS_RFC1035_RECOMMENDED_BUFFER_SIZE] readBuffer;
+ubyte[DNS_RFC1035_MIN_BUFFER_SIZE] writeBuffer;
+auto writeMemory = MemoryWriter(writeBuffer[]);
+
+/++++ Encode the query. If the read buffer is a non-min size then we'll use EDNS and pray ++++/
+
+auto result = dnsEncodeQuery(
+    id: 0,
+    writer: writeMemory,
+    putQuestions: (scope put) => put("forum.dlang.org", DnsRecordType.a, DnsRecordClass.in_),
+    putAdditionalRecords: (scope startNextRecord) {
+        if(readBuffer.length > DNS_RFC1035_MIN_BUFFER_SIZE)
+        {
+            MemoryWriter* writer;
+            auto result = startNextRecord(
+                "",                            // (null/root domain)
+                DnsRecordType.opt,
+                cast(ushort)readBuffer.length, // UDP size we're able to support
+                0,                             // No special RCODE; flags, and version 0 of the OPT payload
+                writer,
+            );
+            if(result.isError)
+                return result;
+
+            // (we're not setting any extended attributes, so the writer goes unused)
+        }
+        return Result.noError;
+    },
+    DnsHeaderOpcode.query,
+);
+if(result.isError)
+    return result;
+```
+
+### Transport - RFC 1035
+
+This transport will attempt to query with UDP a few times (default 3), before trying a single final attempt with TCP, before giving up entirely.
+
+It makes use of the EDNS extension so that it can support UDP responses larger than 512 - the size it sends via EDNS is determined by the caller-provided buffer's size. It's recommended to use a size of `DNS_RFC1035_RECOMMENDED_BUFFER_SIZE` on most networks.
+
+Should the server return a response indicating the response was truncated, this transport will perform the query using TCP instead, discarding the UDP response.
+
+```d
+import juptune.core.util    : resultAssert;
+import juptune.event        : IpAddress;
+import juptune.dns          : DnsQuery, DnsRecordType, dnsQueryRfc1035;
+
+ubyte[] writeBuffer; // (Result of the dnsEncodeQuery example above)
+ubyte[] readBuffer; // (ditto)
+
+IpAddress nameserver;
+IpAddress.parse(nameserver, "1.1.1.1").resultAssert;
+
+size_t readBufferBytesUsed;
+dnsQueryRfc1035(
+    nameserverIp: nameserver,
+    query: DnsQuery(
+        domainName: "forum.dlang.org",
+        recordType: DnsRecordType.a,
+    ),
+    readBuffer: readBuffer,
+    readBufferUsed: readBufferBytesUsed,
+).resultAssert;
+
+const responseSlice = readBuffer[0..readBufferBytesUsed];
+
+// (We'll then decode `responseSlice` further down).
+```
+
+### Decoding a response
+
+After encoding a query with `dnsEncodeQuery`, and getting a response via one of the above transports, we now need to decode the response.
+
+Here's a modified version used by `dnsLookupIp` - again it's wise to give the documentation for [dnsDecodeResponse]() a lookover as well:
+
+```d
+import juptune.core.util : Result;
+import juptune.data      : MemoryReader;
+import juptune.dns       : DnsResponseCode, DnsRecordClass, DnsRecordType, dnsDecodePayload;
+import juptune.event     : IpAddress;
+
+ubyte[] responseSlice; // (Result of one of the transports being used above)
+
+auto reader = MemoryReader(responseSlice);
+IpAddress ipToUse;
+DnsResponseCode rcode;
+
+result = dnsDecodePayload(reader,
+    onHeader: (header) {
+        rcode = header.rcode;
+        return Result.noError;
+    },
+    onAnswer: (record) {
+        if(rcode != DnsResponseCode.none || ipToUse != IpAddress.init)
+            return Result.noError;
+
+        if(record.recordType != expectedRecordType || record.recordClass != DnsRecordClass.in_)
+            return Result.noError;
+
+        // (This is a private function used in juptune.dns)
+        if(!caseInsensitiveCompare("forum.dlang.org", record.domainNameDoNotEscape))
+            return Result.noError;
+
+        auto rdata = MemoryReader(record.rdata);
+        if(expectedRecordType == DnsRecordType.a)
+        {
+            if(rdata.bytesLeft != 4)
+                return Result.noError;
+
+            const(ubyte)[] ipBytes;
+            const couldRead = rdata.readBytes(4, ipBytes);
+            assert(couldRead, "bug: how did this fail?");
+
+            const ipReinterpret = *(cast(uint*)&ipBytes[0]);
+            ipToUse = IpAddress(ipReinterpret, port: 0);
+        }
+        else
+        {
+            if(rdata.bytesLeft != 16)
+                return Result.noError;
+
+            const(ubyte)[] ipBytes;
+            const couldRead = rdata.readBytes(16, ipBytes);
+            assert(couldRead, "bug: how did this fail?");
+
+            ipToUse = IpAddress(ipBytes[0..16], port: 0);
+        }
+        return Result.noError;
+    },
+    onQuestion: (_) => Result.noError, 
+    onAuthority: (_) => Result.noError, 
+    onAdditional: (_) => Result.noError, 
+);
+if(result.isError)
+    return result;
+
+if(rcode != DnsResponseCode.none)
+{
+    import juptune.core.ds : String;
+    switch(rcode)
+    {
+        case DnsResponseCode.nameError:
+            return Result.make(
+                DnsResolverError.notFound,
+                "when looking up IP for domain, nameserver was unable to find domain",
+                String("domain:", domainName, " kind:", ipKind)
+            );
+
+        default:
+            return Result.make(
+                DnsResolverError.badResponse,
+                "when looking up IP for domain, nameserver produced a bad response",
+                String("domain:", domainName, " kind:", ipKind, " rcode:", rcode)
+            );
+    }
+}
+
+if(ipToUse == IpAddress.init)
+    break; // Move onto the next nameserver
+```

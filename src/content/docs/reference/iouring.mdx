@@ -1,0 +1,48 @@
+---
+title: io_uring
+description: A reference page going over Juptune's io_uring functions.
+---
+
+While most code should be using the higher-level interfaces provided by Juptune (e.g. `TcpSocket`) to interact with I/O, it's perfectly possible to instead issue direct commands to io_uring using Juptune's wrapper.
+
+This is only really recommended for very niche purposes, but it's not directly discouraged.
+
+Not all io_uring commands have wrappers, so please raise an issue for any that are missing that you'd like - they're very easy to add in.
+
+## Example
+
+Here's an example of simply creating an IPv6 TCP socket and then closing it:
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event 
+    : 
+        SubmitEventConfig 
+        IoUringSocket, 
+        IoUringClose, 
+        IoUringCompletion, 
+        juptuneEvntLoopSubmitEvent
+    ;
+
+import core.sys.posix.arpa.inet : AF_INET6, SOCK_STREAM;
+
+IoUringSocket op;
+op.domain   = AF_INET6;
+op.type     = SOCK_STREAM;
+op.protocol = 0;
+
+IoUringCompletion cqe;
+juptuneEventLoopSubmitEvent(op, cqe).resultAssert;
+
+const socketFd = cqe.result;
+
+IoUringClose closeOp;
+closeOp.fd = socketFd;
+
+// (This one won't yield our current Fiber)
+juptuneEventLoopSubmitEvent(
+    closeOp, 
+    IoUringCompletion.ignore, 
+    SubmitEventConfig().shouldYieldUntilCompletion(false)
+).resultAssert;
+```

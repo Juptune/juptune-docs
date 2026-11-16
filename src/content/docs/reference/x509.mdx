@@ -7,11 +7,13 @@ import { Aside } from "@astrojs/starlight/components"
 
 Juptune provides a native X.509 certificate parser. It's not fully complete, and the validation isn't full there yet, but the growing pains will hopefully subside.
 
+There's a separate tool built on Juptune called [dx509]() (TODO), which provides some utilities for interacting with X.509 certs.
+
 TODO: Most people won't be touching this code, so not a priority to document it immediately.
 
 ## Default Certificate Store
 
-<Aside type="danger">
+<Aside type="note">
     Any certificate in the bundle that fails to parse is silently discarded, this can lead to confusing errors about missing root certificates.
 
     Feel free to raise an issue with any specific certificate PEMs that are failing so I can eventually look into the decoding error (they're such a PITA though)!
@@ -21,3 +23,22 @@ Juptune will attempt to load the default CA bundle from one of these file paths,
 
 * /etc/ssl/ca-bundle.pem
 * /etc/ssl/certs/ca-certificates.crt
+
+## Supported Algorithms
+
+First part is the algorithm for the trust anchor's key.
+
+Second part is the algorithm for the subject's signature.
+
+* RSA-SHA1
+* RSA-SHA224
+* RSA-SHA256
+* RSA-SHA384
+* RSA-SHA512
+* ECDSA-SHA1
+* ECDSA-SHA224
+* ECDSA-SHA256
+* ECDSA-SHA384
+* ECDSA-SHA512
+
+Support for more is possible (as long as OpenSSL supports it), these are just the ones I've put time into so far.

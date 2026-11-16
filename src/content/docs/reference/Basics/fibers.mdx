@@ -1,0 +1,154 @@
+---
+title: Fibers
+description: A reference page going over Juptune's fibers.
+---
+
+import { Aside } from "@astrojs/starlight/components"
+
+Juptune has a custom implementation of Fibers (also known as Green Threads & somtimes Coroutines).
+
+Fibers will continue to run within an event loop thread until they either:
+
+* Perform an Juptune I/O operation.
+* Manually yield.
+* Are waiting for synchronisation primitive e.g. a Mutex.
+
+At which point they are put to sleep until the event loop next iterates - which is when all remaining fibers in that thread that can progress their work have been woken up and then put back to sleep (or terminated).
+
+## Creating Fibers
+
+Fibers can be created on-demand, and there's no built-in limit for how many can be created for any given event loop thread.
+
+Created fibers start "sleeping", so will start execution on the next event loop iteration.
+
+<Aside type="note">
+    Juptune Fibers are "Juptune Coloured" - they can only be used when inside a Juptune event loop.
+</Aside>
+
+### The simplest way
+
+Simply use the `async` function:
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : async;
+
+// (There's also an `@gc nothrow` overload)
+async(() @nogc nothrow {
+    // Perform some work...
+}).resultAssert;
+```
+
+### Passing context to a fiber
+
+Since Juptune is an `@nogc-first` library, we're unfortunately unable to use D's built-in support for closures when constructing Fibers.
+
+Instead, if a new Fiber needs to be given context from its parent, then a bit of a janky pattern has be used:
+
+```d "context: context" "juptuneEventLoopGetContext!MyContext()"
+import juptune.core.ds   : String;
+import juptune.core.util : resultAssert;
+import juptune.event     : async, juptuneEventLoopGetContext;
+
+static struct MyContext
+{
+    String someDynamicInfo;
+    int moreDynamicInfo;
+}
+
+MyContext context = Context(String("hello!"), 67);
+
+async(() @nogc nothrow {
+    // This is type-safe using a runtime type check.
+    Context* contextFromParent = juptuneEventLoopGetContext!MyContext();
+
+    assert(contextFromParent.someDynamicInfo == "hello!");
+    assert(contextFromParent.moreDynamicInfo == 67);
+}, context: context).resultAssert;
+```
+
+I want to look into making this a bit cleaner (e.g. taking the context as a parameter to the fiber's entrypoint), but for now it is what it is.
+
+Juptune will automatically call the dtor for a context (if it has one) upon termination of the fiber.
+
+### Moving context to a fiber
+
+The above pattern will **copy** the context into the new Fiber's stack - a lot of types in Juptune are either:
+
+* Expensive to copy (e.g. `Array`).
+* Or cannot be copied at all.
+
+There's essentially two options here:
+
+1. Allocate the context onto the heap manually in a way that copying is supported, e.g. using something like `SharedRefCount` (TODO: once a non-shared version is made reference it here instead).
+2. **Move** (instead of **copy**) the context into the new Fiber's stack.
+    1. (This is achieved using Phobos' [move](https://dlang.org/library/std/algorithm/mutation/move.html) function under the hood).
+
+For example, you may have one fiber with a server socket accepting connections, and then you'd like to process each incoming client in its own fiber:
+
+```d "asyncMoveSetter" del={7} ins={10}
+import juptune.core.util : resultAssert;
+import juptune.event     : TcpSocket, async, asyncMoveSetter;
+
+TcpSocket client = acceptClientSomehow();
+
+// This doesn't work, since `TcpSocket` cannot be copied.
+async(() @nogc nothrow {}, context: client).resultAssert;
+
+// This will work, since `TcpSocket` will now be moved instead thanks to asyncMoveSetter.
+async(() @nogc nothrow {}, context: client, setter: asyncMoveSetter);
+```
+
+You may also write your own `setter` function if desired, though copying (the default) and moving (via `asyncMoveSetter`) should cover almost every scenario.
+
+### Creating fibers in other event loop threads
+
+This is currently not possible, though I'd love to tackle this at some point.
+
+Multi-threading + manual memory management is just... very difficult to streamline.
+
+## Yielding
+
+Yielding is very straightforward:
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : yield;
+
+yield().resultAssert;
+```
+
+If an event loop thread has any manually-yielded fibers, the thread will not go to sleep.
+
+So if a Fiber constantly yields thinking it'll magically stop the event loop thread from consuming 100% CPU, think again.
+
+## Sleeping
+
+Currently not implemented, but definitely something that'll come.
+
+## Technicals
+
+### Stack Layout
+
+Fibers are allocated in batches referenced as "walls", where each fiber represents a "brick" in the wall.
+
+Walls contains a large, sequential region of memory that is then split up into individual stacks for Fibers.
+
+Fiber stacks start and end with a guard page to help prevent stack overflows from corrupting another Fiber's stack.
+
+Between the guard page is the large read-write segment of memory that makes up the Fiber's actual stack.
+
+The very start of a Fiber's stack will contain some metadata, and will also contain the "context" passed to the stack upon creation.
+
+The size of "walls" and "bricks" can be configured as part of creating the EventLoop type.
+
+<Aside type="tip">
+    It is heavily recommended to never void-initialise stack variables, that way even large stack allocations
+    should be unable to bypass the guard page without crashing the program.
+
+    e.g. When declaring a `ubyte[100_000]` D will actually set every element in that array to `ubyte.init`, so
+    if this stack variable overlaps a guard page, the program will crash once it tries to write into it.
+
+    e.g. But declaring `ubyte[100_000] array = void` will skip this process, potentially bypassing the guard page and
+    causing stack corruption for another Fiber.
+</Aside>

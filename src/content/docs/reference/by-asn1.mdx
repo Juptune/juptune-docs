@@ -1,0 +1,20 @@
+---
+title: ASN.1
+description: A reference page going over Juptune's ASN.1 parser.
+---
+
+ASN.1 is an ancient piece of technology from the 80s that allows one to describe data via "ASN.1 notation" and then encode that data via many, _many_ different encoding formats that map against the notation.
+
+Juptune provides the following:
+
+* An ASN.1 notation parser (including semantics!)
+    * Handles a sizeable chunk of x.680, all other specs are currently not implemented.
+* Base level DER decoders, for which larger DER decoders are built on top of.
+* Generated DER decoders for:
+    * PKIX1Explicit88
+    * PKIX1Implicit88
+    * (And some other ASN.1 modules related to the above two)
+
+There's a separate tool built on Juptune called [dasn1]() (TODO), which provides an ASN.1 -> D compiler.
+
+TODO: Most people won't be touching this code, so not a priority to document it immediately.

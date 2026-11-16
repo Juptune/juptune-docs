@@ -195,6 +195,17 @@ void main()
 }
 ```
 
+## @gc or @nogc?
+
+Are you writing an application that:
+
+1. Needs _absolute_ control of memory at all times?
+2. Uses a large amount of threads spread across large amounts of CPU cores, to such an extent that GC pauses have a notable impact?
+
+If you've answered yes to either question: go with `@nogc` for your hot paths.
+
+For all other cases go with `@gc`.
+
 ## Next Steps
 
 Since Juptune is in alpha I've refrained from writing extensive "here's some ideas you can try" guides as they'll become

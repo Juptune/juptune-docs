@@ -1,0 +1,79 @@
+---
+title: UTF-8
+description: A reference page going over Juptune's UTF-8 functions.
+---
+
+Juptune provides utilities for decoding; encoding, and validating UTF-8.
+
+It's really annoying that Phobos' implementation isn't `@nogc nothrow` since it really shouldn't need the GC.
+
+## Validation
+
+Validation is pretty easy. The input is typed as a `const(void)[]` so both `const(ubyte)[]` and `const(char)[]` are valid inputs:
+
+```d
+import juptune.data : utf8Validate;
+
+auto result = utf8Validate("こんにちは");
+if(result.isError)
+    // (Invalid UTF-8)
+
+// (Valid UTF-8)
+```
+
+## Decoding
+
+Decoding is done on a codepoint-by-codepoint basis. The decoder function will advance a caller-controlled cursor so the caller can keep track of progress easily (or only decode certain parts of its input):
+
+```d
+import juptune.data : utf8DecodeNext;
+
+const(ubyte)[] input = [0xEC, 0x9C, 0x84];
+
+dchar decoded;
+size_t cursor;
+
+auto result = utf8DecodeNext(input, cursor, decoded);
+if(result.isError)
+    // (Invalid UTF-8)
+
+// (Valid)
+
+assert(decoded == '위');
+assert(cursor == 3);
+```
+
+## Encoding
+
+Encoding is also done on a codepoint-by-codepoint basis. This function **does not** perform validation automatically, so it's advised to call `utf8Validate` at the end:
+
+```d
+
+import juptune.core.ds : Array;
+import juptune.data    : Utf8EncodeCharBuffer, utf8Encode, utf8Validate;
+
+dstring input = "위위위";
+Array!ubyte output;
+
+foreach(ch; input)
+{
+    Utf8EncodeCharBuffer buffer;
+    ubyte[] usedSliceOfBuffer;
+
+    auto result = utf8Encode(ch, buffer, usedSliceOfBuffer);
+    if(result.isError)
+        return result;
+
+    output.put(usedSliceOfBuffer);
+}
+
+auto result = utf8Validate(output.slice);
+if(result.isError)
+    // (Invalid)
+
+// (Valid)
+```
+
+If you'd like to encode a `char[]` or a `wchar[]` instead, you'd have to use `utf8DecodeNext` to get each codepoint as a `dchar`, and then pass that `dchar` into `utf8Encode`.
+
+In D only `dchar`/`dstring` is able to natively fit a full codepoint into each element. `char[]` for example will actually be UTF-8 encoded already, where each `char` is instead a code **unit** instead of a code **point**... in normal cirumstances.

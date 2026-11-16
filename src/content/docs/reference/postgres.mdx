@@ -1,0 +1,469 @@
+---
+title: Postgres
+description: A reference page going over Juptune's Postgres driver.
+---
+
+import { Steps, Tabs, TabItem } from "@astrojs/starlight/components"
+
+Juptune provides a native Postgres driver, in both high-level and low-level forms.
+
+## Limitations
+
+### Authentication
+
+Any authentication method that isn't SCRAM-SHA256 is unsupported.
+
+### Unimplemented features
+
+* Replication streaming
+* COPY support
+* Query cancellation
+
+## PostgresClient
+
+This is the high-level client that most code should be using.
+
+### Connecting
+
+The connection will automatically be upgraded to TLS if possible/required.
+
+`PostgresConnectInfo` has settings for controlling which certificate store gets used, and whether to trust server certificates that are self-signed.
+
+```d
+import juptune.core.util    : resultAssert;
+import juptune.event        : IpAddress;
+import juptune.postgres     : PostgresClient, PostgresProtocolConfig, PostgresConnectInfo, PostgresTlsMode;
+
+// TODO: Need to add native parsing into the connect function.
+IpAddress ip;
+IpAddress.parse(ip, "127.0.0.1:5432").resultAssert;
+
+auto psql = PostgresClient(PostgresProtocolConfig());
+psql.connect(ip, PostgresConnectInfo(
+    user:               "dummy",
+    databaseOrNull:     "transactions",
+    plaintextPassword:  "dummy",
+    tlsMode:            PostgresTlsMode.always,
+)).resultAssert;
+```
+
+### Querying & Scanning
+
+It's recommended to go read through the documentation for [PostgresClient]() (TODO) in general for specifics, but here's a quick overview.
+
+When using the higher-level client, all variable length data can only be read into types that allocate memory.
+
+e.g. textual types can only ever be read into `string` and `String`, so there's no worry needed around the lifecycle of scanned results.
+
+<Steps>
+    1. Let's call `.exec` to put some data into a table - here's a very verbose example showing all of the supported types:
+    
+        ```d
+        psql.exec(
+            `
+                INSERT INTO test_scratchpad (
+                    cn,     // CHARACTER (10)
+                    cnv,    // CHARACTER VARYING (10)
+                    t,      // TEXT
+                    i,      // INT
+                    si,     // SMALLINT
+                    b,      // BOOLEAN
+                    ti,     // TIME
+                    tiz,    // TIME WITH TIME ZONE
+                    d,      // DATE
+                    ts,     // TIMESTAMP
+                    tstz    // TIMESTAMP WITH TIME ZONE
+                ) VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    $9,
+                    $10,
+                    $11
+                )
+            `,
+            "cn val",           // $1
+            "cnv val",          // $2
+            "text val",         // $3
+            int.max,            // $4
+            short.max,          // $5
+            true,               // $6
+            2.hours,            // $7
+            PostgresTimetz(     // $8
+                4.hours,
+                0.hours
+            ),
+            PostgresDate(       // $9
+                1234,
+                6,
+                7
+            ),
+            PostgresTimestamp(  // $10
+                PostgresDate(1234, 5, 6),
+                3.hours
+            ),
+            PostgresTimestamptz(// $11
+                PostgresDate(1234, 5, 6),
+                PostgresTimetz(6.hours, 0.hours)
+            ),
+        ).resultAssert;
+        ```
+
+    2. Then we can query a single row using `.rowScanner().queryRow()`:
+
+        ```d
+        int id;
+        String cn, cnv; // (When working with @nogc code)
+        string t; // (When working with @gc code)
+        int i;
+        short si;
+        bool b;
+        Duration ti;
+        PostgresTimetz tiz;
+        PostgresDate d;
+        PostgresTimestamp ts;
+        PostgresTimestamptz tstz;
+
+        psql.rowScanner(id, cn, cnv, t, i, si, b, ti, tiz, d, ts, tstz)
+            .queryRow(`SELECT * FROM test_scratchpad;`)
+            .resultAssert;
+
+        assert(t == "text val");
+        // etc.
+        ```
+
+    3. Or even multiple rows from a single query:
+    
+        ```d
+        int id;
+        String cn, cnv; // (When working with @nogc code)
+        string t; // (When working with @gc code)
+        int i;
+        short si;
+        bool b;
+        Duration ti;
+        PostgresTimetz tiz;
+        PostgresDate d;
+        PostgresTimestamp ts;
+        PostgresTimestamptz tstz;
+
+        psql.rowScanner(id, cn, cnv, t, i, si, b, ti, tiz, d, ts, tstz)
+            // (Alternatively: .queryGc)
+            .query(
+                `SELECT * FROM test_scratchpad;`,
+                onRow: () @nogc nothrow {
+                    assert(t == "text val");
+                    // etc. - please remember that each call to `onRow` means the stack variables have been overwritten with new values.
+                    return Result.noError;
+                }
+            )
+            .resultAssert;
+        ```
+</Steps>
+
+### Prepared Queries
+
+(Currently no high-level support, though the low-level `PostgresProtocol` can generate the protocol messages needed for it).
+
+I'm mainly trying to figure lifecycle logistics more than anything. It'd be _awesome_ if prepared queries could be given a typed interface for all of the columns it returns, or something fancy like that.
+
+### Error handling
+
+If the client returns an error, you MUST check `psqlClient.protocol.isReadyForQuery` before using it again. If it's false then you must discard/recreate the client.
+
+This is because certain errors cannot be recovered from without initialising a new connection.
+
+## PostgresProtocol
+
+This is the low-level driver, it doesn't give **completely raw** access to the underlying protocol, but it gets very close to it.
+
+Maybe in the future I may add a public interface for sending individual protocol messages, rather than the higher-level ones that bundle a bunch together.
+
+### Connection
+
+(It's almost literally the same as `PostgresClient` right now, just change `PostgresClient` to `PostgresProtocol`).
+
+### Simple Querying
+
+This is a relatively high-level helper function for more easily querying with `PostgresProtocol` - it's not as simple as `PostgresClient`, however it does allow you to process queries without allocating memory.
+
+This is a very verbose example from the driver's integration test suite, showcasing the full extent of its usage:
+
+<Tabs>
+    <TabItem label="Hide Code"></TabItem>
+    <TabItem label="Show Code">
+        ```d
+        @Test("onRowDescription & onDataRow - most types with a directly provided decoder - text format")
+        Result onRowDescription_onDataRow_supportedTypes_text()
+        {
+            PostgresProtocol psql = connectToPsqlProtocol();
+            psql.simpleQueryGc(`
+                DROP TABLE IF EXISTS onRowDescription_onDataRow_supportedTypes_text;
+                CREATE TABLE onRowDescription_onDataRow_supportedTypes_text(
+                    id SERIAL PRIMARY KEY NOT NULL,
+
+                    b BOOLEAN,
+                    cn CHARACTER (10),
+                    cnv CHARACTER VARYING (10),
+                    d DATE,
+                    dp DOUBLE PRECISION,
+                    i INTEGER,
+                    r REAL,
+                    si SMALLINT,
+                    t TEXT,
+                    ti TIME,
+                    tiz TIME WITH TIME ZONE,
+                    ts TIMESTAMP,
+                    tsz TIMESTAMP WITH TIME ZONE,
+                    u UUID
+                );
+
+                INSERT INTO onRowDescription_onDataRow_supportedTypes_text(
+                    b,
+                    cn,
+                    cnv,
+                    d,
+                    dp,
+                    i,
+                    r,
+                    si,
+                    t,
+                    ti,
+                    tiz,
+                    ts,
+                    tsz,
+                    u
+                ) VALUES 
+                    (TRUE, '123', '1234', '1234-01-02', 123.456, 123, 123.456, 123, '123', '01:02:03.456', '01:02:03.456+7', '1234-01-02 01:02:03', '1234-01-02 01:02:03.456+7', 'dfc17952-6eaa-4aca-a455-0b7f5eed2b46')
+                ;
+
+                SELECT * FROM onRowDescription_onDataRow_supportedTypes_text;
+            `,
+            onRowDescriptionOrNull: (ushort columnCount, scope PostgresProtocol.NextColumnDescriptionT nextColumnDescription) {
+                foreach(i; 0..columnCount)
+                {
+                    PostgresColumnDescription desc;
+                    auto result = nextColumnDescription(desc);
+                    if(result.isError)
+                        return result;
+
+                    enforce(desc.format == PostgresColumnDescription.Format.text);
+                    enforce(desc.columnAttributeNumber == i + 1);
+
+                    switch(i)
+                    {
+                        case 0:
+                            enforce(desc.nameDoNotCopy == "id");
+                            enforce(desc.dataType == PostgresDataTypeOid.int4);
+                            break;
+                        case 1:
+                            enforce(desc.nameDoNotCopy == "b");
+                            enforce(desc.dataType == PostgresDataTypeOid.boolean);
+                            break;
+                        case 2:
+                            enforce(desc.nameDoNotCopy == "cn");
+                            enforce(desc.dataType == PostgresDataTypeOid.bpchar);
+                            break;
+                        case 3:
+                            enforce(desc.nameDoNotCopy == "cnv");
+                            enforce(desc.dataType == PostgresDataTypeOid.varchar);
+                            break;
+                        case 4:
+                            enforce(desc.nameDoNotCopy == "d");
+                            enforce(desc.dataType == PostgresDataTypeOid.date);
+                            break;
+                        case 5:
+                            enforce(desc.nameDoNotCopy == "dp");
+                            enforce(desc.dataType == PostgresDataTypeOid.float8);
+                            break;
+                        case 6:
+                            enforce(desc.nameDoNotCopy == "i");
+                            enforce(desc.dataType == PostgresDataTypeOid.int4);
+                            break;
+                        case 7:
+                            enforce(desc.nameDoNotCopy == "r");
+                            enforce(desc.dataType == PostgresDataTypeOid.float4);
+                            break;
+                        case 8:
+                            enforce(desc.nameDoNotCopy == "si");
+                            enforce(desc.dataType == PostgresDataTypeOid.int2);
+                            break;
+                        case 9:
+                            enforce(desc.nameDoNotCopy == "t");
+                            enforce(desc.dataType == PostgresDataTypeOid.text);
+                            break;
+                        case 10:
+                            enforce(desc.nameDoNotCopy == "ti");
+                            enforce(desc.dataType == PostgresDataTypeOid.time);
+                            break;
+                        case 11:
+                            enforce(desc.nameDoNotCopy == "tiz");
+                            enforce(desc.dataType == PostgresDataTypeOid.timetz);
+                            break;
+                        case 12:
+                            enforce(desc.nameDoNotCopy == "ts");
+                            enforce(desc.dataType == PostgresDataTypeOid.timestamp);
+                            break;
+                        case 13:
+                            enforce(desc.nameDoNotCopy == "tsz");
+                            enforce(desc.dataType == PostgresDataTypeOid.timestamptz);
+                            break;
+                        case 14:
+                            enforce(desc.nameDoNotCopy == "u");
+                            enforce(desc.dataType == PostgresDataTypeOid.uuid);
+                            break;
+
+                        default: throw new Exception("out of bounds");
+                    }
+                }
+
+                return Result.noError;
+            },
+            onDataRowOrNull: (ushort columnCount, scope PostgresProtocol.NextColumnDataT nextData){
+                import core.time : Duration, hours, minutes, seconds, msecs;
+                import juptune.postgres.protocol.datatypes;
+
+                foreach(i; 0..columnCount)
+                {
+                    MemoryReader memory;
+                    bool isNull;
+                    auto result = nextData(memory, isNull);
+                    if(result.isError)
+                        return result;
+
+                    enforce(!isNull);
+
+                    switch(i)
+                    {
+                        case 0:
+                            int v;
+                            decodeInt4Text(memory, v, psql.params).resultEnforce;
+                            enforce(v == 1);
+                            break;
+                        case 1:
+                            bool v;
+                            decodeBooleanText(memory, v, psql.params).resultEnforce;
+                            enforce(v);
+                            break;
+                        case 2:
+                            const(char)[] v;
+                            decodeTextText(memory, v, psql.params).resultEnforce;
+                            enforce(v == "123       "); // Since CHARACTER (nn) will add padding to match (nn)
+                            break;
+                        case 3:
+                            const(char)[] v;
+                            decodeTextText(memory, v, psql.params).resultEnforce;
+                            enforce(v == "1234");
+                            break;
+                        case 4:
+                            PostgresDate v;
+                            decodeDateText(memory, v, psql.params).resultEnforce;
+                            enforce(v == PostgresDate(1234, 1, 2));
+                            break;
+                        case 5:
+                            // TODO: need float support
+                            break;
+                        case 6:
+                            int v;
+                            decodeInt4Text(memory, v, psql.params).resultEnforce;
+                            enforce(v == 123);
+                            break;
+                        case 7:
+                            // TODO: need float support
+                            break;
+                        case 8:
+                            short v;
+                            decodeInt2Text(memory, v, psql.params).resultEnforce;
+                            enforce(v == 123);
+                            break;
+                        case 9:
+                            const(char)[] v;
+                            decodeTextText(memory, v, psql.params).resultEnforce;
+                            enforce(v == "123");
+                            break;
+                        case 10:
+                            Duration v;
+                            decodeTimeText(memory, v, psql.params).resultEnforce;
+                            enforce(v == 1.hours + 2.minutes + 3.seconds + 456.msecs);
+                            break;
+                        case 11:
+                            PostgresTimetz v;
+                            decodeTimetzText(memory, v, psql.params).resultEnforce;
+                            enforce(v == PostgresTimetz(
+                                1.hours + 2.minutes + 3.seconds + 456.msecs,
+                                7.hours
+                            ));
+                            break;
+                        case 12:
+                            PostgresTimestamp v;
+                            decodeTimestampText(memory, v, psql.params).resultEnforce;
+                            enforce(v == PostgresTimestamp(
+                                PostgresDate(1234, 1, 2),
+                                1.hours + 2.minutes + 3.seconds
+                            ));
+                            break;
+                        case 13:
+                            PostgresTimestamptz v;
+                            decodeTimestamptzText(memory, v, psql.params).resultEnforce;
+                            enforce(v == PostgresTimestamptz(
+                                // Postgres automatically applies the timezone in this case.
+                                PostgresDate(1234, 1, 1),
+                                PostgresTimetz(
+                                    18.hours + 2.minutes + 3.seconds + 456.msecs,
+                                    Duration.zero
+                                )
+                            ), format("%s", v));
+                            break;
+                        case 14:
+                            // NOTE: There's no special UUIDv4 decoding yet.
+                            const(char)[] v;
+                            decodeTextText(memory, v, psql.params).resultEnforce;
+                            enforce(v == "dfc17952-6eaa-4aca-a455-0b7f5eed2b46");
+                            break;
+
+                        default: throw new Exception("out of bounds");
+                    }
+                }
+
+                return Result.noError;
+            }).resultEnforce;
+
+            return Result.noError;
+        }
+        ```
+    </TabItem>
+</Tabs>
+
+### Preparing statements and executing them
+
+TODO:
+
+### Error handling
+
+As with `PostgresClient`, if `PostgresProtocol` ever produces an error then you MUST check `protocol.isReadyForQuery`.
+
+## Technicals
+
+### Supported authentication
+
+* SCRAM-SHA256
+    * (SASL is peak 90's protocol design, in all the weird ways).
+
+### Wire formats
+
+Juptune supports the text formats of most Postgres types, and a smaller amount of binary formats.
+
+Currently all data is always requested and sent via their text format when using `PostgresClient`. This is mainly due to a lack of effort to switch formats for certain data types rather than a technical limitation.
+
+### Memory allocation
+
+Due to how the Postgres protocol works, attemping to parse the data in chunks (i.e. using a fixed-size buffer) isn't very easy to deal with.
+
+So instead `PostgresProtocol` (and `PostgresClient` by proxy) will dynamically allocate memory to store the entire response from the server before processing it, hence why there's never a need to pass in a buffer like with most other protocol implementations in Juptune.
+
+You can limit the min and max size of this buffer inside of `PostgresProtocolConfig`.

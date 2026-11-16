@@ -1,0 +1,52 @@
+---
+title: Synchronisation
+description: A reference page going over Juptune's synchronisation primitives.
+---
+
+As Juptune is a multi-threaded library, it goes without saying that it needs to provide synchronisation primitives.
+
+Although, it's not _quite_ as useful right now considering the lack of native multi-threaded communication channels.
+
+## Mutex
+
+This is technically a "Futex" who's implementation is ultimately based on [this paper](https://dept-info.labri.fr/~denis/Enseignement/2008-IR/Articles/01-futex.pdf).
+
+### Example
+
+```d
+@("manual debug (since it needs to sleep)")
+unittest
+{
+    import core.time : seconds;
+    import core.thread : Thread;
+
+    import std.stdio : writeln;
+
+    import juptune.core.util : resultAssert;
+    import juptune.event;
+
+    __gshared Mutex mutex;
+
+    auto loop = EventLoop(EventLoopConfig());
+    loop.addGCThread(() nothrow {
+        debug writeln("1 - start");
+        mutex.lock().resultAssert;
+        debug writeln("1 - got");
+        Thread.sleep(2.seconds);
+        debug writeln("1 - slept");
+        mutex.unlock().resultAssert;
+        debug writeln("1 - unlocked");
+        // mutex.__xdtor();
+    });
+    loop.addGCThread(() nothrow {
+        debug writeln("2 - start");
+        mutex.lock().resultAssert;
+        debug writeln("2 - got");
+        Thread.sleep(2.seconds);
+        debug writeln("2 - slept");
+        mutex.unlock().resultAssert;
+        debug writeln("2 - unlocked");
+    });
+    loop.join();
+}
+```

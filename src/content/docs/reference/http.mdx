@@ -1,0 +1,108 @@
+---
+title: HTTP
+description: A reference page going over Juptune's HTTP implementation.
+---
+
+import { Aside } from "@astrojs/starlight/components"
+
+Juptune provides the following:
+
+* A low-level HTTP1 reader and writer.
+* A higher-level HTTP client.
+
+A HTTP Server is planned but not implemented yet.
+
+I'm _interested_ in adding HTTP2 support, but that'll likely come much later.
+
+## Quirks
+
+### Headers are always sent in lower-case
+
+This is also the case for HTTP 1.1, which traditionally supports case-sensitive headers.
+
+My personal view is that case-sensitive headers are a relic of the past that shouldn't be relied on, hence this potentially annoying decision.
+
+## HttpClient
+
+This is intended to be a pretty easy to use client that'll transparently support any version of HTTP that's been implemented into Juptune.
+
+It's currently not as nice to use as it could be though - it's definitely more the foundations for a being refactored into a much better API.
+
+<Aside type="danger">
+    The API for this type is very, **very** likely to completely change.
+</Aside>
+
+### Basic usage
+
+```d
+import juptune.core.util : Result, resultAssert;
+import juptune.dns       : dnsLookupIp;
+import juptune.event     : EventLoop, EventLoopConfig, IpAddress;
+import juptune.http      : HttpClient, HttpClientConfig, HttpRequest, HttpResponse;
+
+void main()
+{
+    auto loop = EventLoop(EventLoopConfig());
+    loop.addNoGCThread(() @nogc nothrow {
+        /** 
+            This is still really bulky since some stuff is still TODO, 
+            e.g. HttpClient supporting DNS lookups natively; simpler GET and POST interface, etc. 
+        **/
+        IpAddress ip;
+        dnsLookupIp("forum.dlang.org", ip).resultAssert;
+
+        auto client = HttpClient(HttpClientConfig());
+        client.connectTls(ip, "forum.dlang.org").resultAssert;
+
+        HttpRequest req;
+        req.withPath("/");
+        req.withMethod("GET");
+
+        HttpResponse res;
+        client.request(req, res).resultAssert;
+
+        import core.stdc.stdio : printf;
+        printf("%d %s: Received %lld bytes from forum.dlang.org!", res.status, res.reason.slice.ptr, res.body.length);
+    });
+    loop.join();
+}
+```
+
+### POSTing with a body and headers
+
+```d
+/** 
+    This is still really bulky since some stuff is still TODO, 
+    e.g. HttpClient supporting DNS lookups natively; simpler GET and POST interface, etc. 
+**/
+IpAddress ip;
+dnsLookupIp("some.api.example.org", ip).resultAssert;
+
+auto client = HttpClient(HttpClientConfig());
+client.connectTls(ip, "some.api.example.org").resultAssert;
+
+HttpRequest req;
+req.withPath("/");
+req.withMethod("POST");
+req.setHeader("Authorization", "Bearer yaydadya");
+req.putBody(cast(ubyte[])`{"my": "payload!"}`);
+
+HttpResponse res;
+client.request(req, res).resultAssert;
+```
+
+## Low-level HTTP 1.1
+
+The HTTP 1.1 implementation was effectively the very first thing implemented after the event loop, and so I've made some _questionable_ design decisions.
+
+The ability to write into and read from a HTTP 1.1 socket was split out into two separate types: `Http1Writer` and `Http1Reader`, respectively.
+
+Instead of using a more comfortable scoped callback pattern; or some other form of relatively sane memory management, it instead employs RAII types that internally lock memory from being used until the RAII type expires, which isn't too bad to work with, it's just a lot more different than the rest of Juptune.
+
+### Http1Writer & Http1Reader
+
+TODO: Honestly just go look at the [docs]() (TODO) since these things are pretty complicated, and they use a state machine that forces a correct incantation.
+
+### TLS
+
+Just use `Http1WriterBase!TlsSocket` and `Http1ReaderBase!TlsSocket`, and use them like normal.

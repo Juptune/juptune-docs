@@ -1,0 +1,37 @@
+---
+title: Byte Handling
+description: A reference page on Juptune's byte manipulation.
+---
+
+Juptune provides [MemoryWriter]() (TODO) and [MemoryReader] (TODO) types for easily dealing with binary based formats.
+
+## Examples
+
+### Chaining pattern
+
+Juptune uses this particular chaining pattern a lot in order to reduce the amount of branches needed for reporting errors:
+
+```d
+import juptune.data : MemoryReader;
+
+auto reader = MemoryReader([/*Some data*/]);
+
+ubyte byte1,byte2,byte3;
+
+auto couldReadHeader = reader.readU8(byte1);
+     couldReadHeader = couldReadHeader && reader.readU8(byte2);
+     couldReadHeader = couldReadHeader && reader.readU8(byte3);
+
+if(!couldReadHeader)
+    /* Return an error result or something */
+```
+
+### Subviews
+
+One fairly useful way of using MemoryReaders is to create subreaders.
+
+e.g. If your binary format has prefixed some data with a length, then you can:
+
+* Read in `length` bytes from the input.
+* Feed the resulting slice into a different `MemoryReader`.
+* And now the different `MemoryReader` is fully constrained to that section of the input slice, without much fear of accidentally reading past it.

@@ -1,0 +1,266 @@
+---
+title: Files & Sockets
+description: A reference page going over Juptune's basic I/O interfaces.
+---
+
+import { Aside } from "@astrojs/starlight/components"
+
+Juptune provides high-_ish_ level wrappers for dealing with Sockets; Files, and Directories.
+
+Most I/O functions also take an optional timeout parameter, which generally isn't shown in the examples. By default there is no timeout.
+
+## Writing
+
+For wrappers that support writing (namely `TcpSocket` and `File` - `UdpSocket` is different), there's a common writer interface they implement.
+
+### `send`
+
+This is the typical low-level write option. It'll try to write as much as it can in one go, and then tell you how much it actually managed to write, so you have to try again and again until you're done:
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : File;
+
+File f;
+File.createOrTruncate("test", f).resultAssert;
+
+const(ubyte)[] data = [1, 2, 3, 4, 5];
+auto dataLeft = data;
+
+while(dataLeft.length > 0)
+{
+    size_t bytesSent;
+    f.send(dataLeft, bytesSent).resultAssert;
+    dataLeft = dataLeft[0..bytesSent];
+}
+```
+
+### `writev`
+
+Similar to `send` except this is the low-level "scattered" writer - it'll try to write from multiple buffers sequentially:
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : File;
+
+File f;
+File.createOrTruncate("test", f).resultAssert;
+
+const(ubyte)[][] data = [
+    [1, 2, 3, 4, 5],
+    [6, 7, 8, 9, 10],
+];
+
+size_t bytesSent;
+f.writev(data, bytesSent).resultAssert;
+
+assert(bytesSent == 10);
+```
+
+### `put`
+
+This is the higher-level variant of `send` - it'll continuously write its data until it's all been sent through (or an error occurs):
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : File;
+
+File f;
+File.createOrTruncate("test", f).resultAssert;
+
+const(ubyte)[] data = [1, 2, 3, 4, 5];
+f.put(data).resultAssert;
+```
+
+### `putScattered`
+
+This is the higher-level variant of `writev` - it'll continuously write its data until it's all been sent through (or an error occurs).
+
+<Aside type="caution">
+    This function takes a slice of slices as its input. It may **modify** the entries of this slice under
+    certain conditions due to some implementation quirks.
+
+    Treat the top-level slice (wrapping around the other slices) as ephermeral.
+</Aside>
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : File;
+
+File f;
+File.createOrTruncate("test", f).resultAssert;
+
+const(ubyte)[] data1 = [1, 2, 3, 4, 5];
+const(ubyte)[] data2 = [6, 7, 8, 9, 10];
+
+// (The input is marked as `scope`, so it's possible to create `@nogc` slices like this.)
+f.putScattered([data1, data2]).resultAssert;
+```
+
+## Reading
+
+Similarly to writing there's a generic set of reading functions that are common to some of the types.
+
+### `receive`
+
+This is the typical low-level read option. It'll try to read as much as it can in one go (up to the provided buffer length), and returns a slice containing the data that was read in:
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : File;
+
+File f;
+File.openForReading("test", f).resultAssert;
+
+ubyte[1024] buffer;
+ubyte[] usedPartOfBuffer;
+
+f.receive(buffer, usedPartOfBuffer).resultAssert;
+
+const bytesRead = usedPartOfBuffer.length;
+```
+
+### `readv`
+
+Similar to `send` except this is the low-level "gathered" reader - it'll try to read into multiple buffers sequentially:
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : File;
+
+File f;
+File.openForReading("test", f).resultAssert;
+
+ubyte[512] buffer1;
+ubyte[512] buffer2;
+
+size_t bytesRead;
+f.readv([buffer1, buffer2], bytesRead).resultAssert;
+```
+
+### `readAll` & `readAllGC`
+
+The high-level verison of `receive` - it will continue to read and grow an `Array` or `ubyte[]` until `receive` returns a value of 0 bytes being read in.
+
+This isn't useful most things that aren't `File`, since instead of returning 0 they'll just hang and wait for data.
+
+```d
+import juptune.core.ds   : Array;
+import juptune.core.util : resultAssert;
+import juptune.event     : File;
+
+File f;
+File.openForReading("test", f).resultAssert;
+
+// These are appended to as data is read in, so allocations happen.
+Array!ubyte nogcOption;
+ubyte[] gcOption;
+
+f.readAll(nogcOption).resultAssert;
+f.readAllGC(gcOption).resultAssert;
+```
+
+## TcpSocket
+
+Wrapper for using a TCP socket with io_uring.
+
+Currently, this socket is always created in dual-stack mode, and will always have `SO_REUSEADDR`, `SO_REUSEPORT`, and `SO_KEEPALIVE` enabled.
+
+### Basic client
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : TcpSocket;
+
+bool wasLookupPerformed; // NOTE: This is probably going to be removed very soon.
+
+TcpSocket client;
+client.open().resultAssert;
+client.connect("127.0.0.1:1234", wasLookupPerformed).resultAssert;
+
+// You can read and write with the socket now.
+```
+
+### Basic server
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : TcpSocket;
+
+TcpSocket server;
+server.open().resultAssert;
+server.listen("127.0.0.1:1234", backlog: 100).resultAssert;
+
+TcpSocket client;
+server.accept(client).resultAssert;
+
+// You can communicate with the client with `client`.
+```
+
+## UdpSocket
+
+Wrapper for using a TCP socket with io_uring.
+
+Currently, this socket is always created in dual-stack mode, and will always have `SO_REUSEADDR`, and `SO_REUSEPORT` enabled.
+
+This socket is a bit special, since it has its own dedicated `sendmsg` and `recvmsg` functions instead of the generic writing and reading functions.
+
+### Basic "Client"
+
+Since UDP doesn't really "connect" to anywhere, calling "connect" essentially just sets the default destination for datagrams, and limits datagrams coming into the socket to be from that address.
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : UdpSocket;
+
+UdpSocket client;
+client.open().resultAssert;
+client.connect("127.0.0.1:1234").resultAssert;
+```
+
+### Basic server
+
+TODO
+
+### `sendmsg`
+
+Since UDP works in datagrams rather than "stream" of data, the generic reading and writing functions aren't suitable for UdpSocket.
+
+Instead, UdpSocket contains `sendmsg` for writing datagrams. This is a "scattered" write as well - the various buffers will effectively be sequentially concatenated during sending:
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.event     : UdpSocket, IpAddress;
+
+// (If you don't call `.connect` first, then you MUST supply an IP to `.sendmsg`)
+IpAddress ip;
+IpAddress.parse(ip, "127.0.0.1:1234").resultAssert;
+
+UdpSocket client;
+client.open().resultAssert;
+
+ubyte[] data1 = [1, 2, 3, 4, 5];
+ubyte[] data2 = [6, 7, 8, 9, 10];
+
+client.sendmsg([data1, data2], target: ip).resultAssert;
+```
+
+### `recvmsg`
+
+Similarly, `recvmsg` is used for reading datagrams. It'll also provide the IP address of the sender:
+
+```d
+import std.typecons      : Nullable;
+import juptune.core.util : resultAssert;
+import juptune.event     : UdpSocket, IpAddress;
+
+UdpSocket client;
+client.open().resultAssert;
+
+ubyte[512] buffer1;
+ubyte[512] buffer2;
+
+Nullable!IpAddress senderIp;
+size_t bytesRead;
+client.recvmsg([buffer1, buffer2], bytesRead, senderIp).resultAssert;
+```

@@ -1,0 +1,51 @@
+---
+title: PEM
+description: A reference page going over Juptune's PEM functions.
+---
+
+Juptune provides a native, generic PEM parser.
+
+## Example
+
+This is a slightly modified example from the dx509 tool's `hexdump` command, which, as the name suggets, dumps out the contents of a PEM certificate as hex.
+
+```d
+import std.array         : Appender;
+import std.exception     : enforce;
+import std.format        : format;
+import std.stdio         : writef;
+import juptune.core.util : Result, resultEnforce;
+import juptune.data      : PemParser;
+
+const pem = "(Read this in from somewhere)"
+
+Appender!(ubyte[]) buffer;
+auto parser = PemParser(pem);
+while(!parser.eof)
+{
+    parser.parseNextGC(
+        onStart: (label){
+            enforce(label == "CERTIFICATE", format("expected data boundary in PEM to have label CERTIFICATE, got label '%s' instead", label));
+            return Result.noError; 
+        },
+        onData: (scope data){
+            buffer.put(data);
+            return Result.noError; 
+        },
+        onEnd: (){
+            writef("---\n%d:\n[             /* 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F */", i);
+
+            foreach(i, byte_; buffer.data)
+            {
+                if(i == 0 || (i % 0x10) == 0)
+                    writef("\n    /* 0x%04X */ ", cast(uint)i);
+                writef("0x%02X, ", byte_);
+            }
+
+            writef("\n]\n");
+            buffer.clear();
+            return Result.noError;
+        },
+    ).resultEnforce;
+}
+```

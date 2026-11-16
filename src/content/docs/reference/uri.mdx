@@ -1,0 +1,72 @@
+---
+title: URI
+description: A reference page going over Juptune's URI parser.
+---
+
+Juptune provides a validating URI parser as specified in RFC 3986.
+
+There's currently no encoder utilities.
+
+## Parsing a URI
+
+Please note that the `Uri` struct will be full of slices directly from the input string. So once that input string's lifetime is up, any Uris parsed from it should also be treated as disposed.
+
+If you're using `@gc` then this isn't really a concern if the input string is on the GC heap.
+
+### Strict Parsing
+
+It's common for people to specify URIs such as "abc.com/yada" and expect them to be able to parse correctly.
+
+Strictly speaking this isn't possible using the grammar defined in RFC 3986, and is actually acknowledged as a format known as a "URI suffix".
+
+The default mode of parsing - strict parsing - will refuse to parse "abc.com/yada" as "hostname=abc.com path=/yada", but rather it'd parse it as "path=abc.com/yada":
+
+### allowUriSuffix Parsing
+
+In order to allow for URI suffixes to be parsed interpreted as a hostname + path, you must pass `UriParseRules.allowUriSuffix` into `uriParseNoCopy`.
+
+### `uriParseNoCopy`
+
+This function will parse various forms of URIs (please see the [documentation]() (TODO) for specifics) into a `Uri` struct:
+
+```d
+import juptune.core.util : resultAssert;
+import juptune.http      : Uri, UriParseHints, uriParseNoCopy;
+
+Uri parsed;
+uriParseNoCopy("https://user:password@forum.dlang.org:443/some/pa%20th?crazy=query&lol=true#fragment", parsed).resultAssert;
+
+assert(parsed.scheme    == "https://");
+assert(parsed.userInfo  == "user:password");
+assert(parsed.host      == "forum.dlang.org");
+assert(!parsed.port.isNull);
+assert(parsed.port.get  == 443);
+assert(parsed.path      == "/some/pa%20th");
+assert((parsed.hints & UriParseHints.percentEncodedPath) > 0);
+assert(parsed.query     == "?crazy=query&lol=true");
+assert(parsed.fragment  == "#fragment");
+```
+
+### Hints
+
+Since there are so many valid forms of URIs and so many tiny variations, the `Uri` struct will have its `hints` field populated with a bitflag of `UriParseHints`.
+
+These hints can be used to glean the original structure of the URI, as well as detect slow-paths such as having to URI-decode parts of the URI (e.g. because percent-encoding was used somewhere).
+
+### IP support
+
+If the hostname is an IP, then `Uri.hostAsIp` will be set to a non-null IpAddress.
+
+## Percent Decoding
+
+You may use the `UriDecoder` struct (or its functional version of `uriDecoder`) to decode a percent-encoded string into an InputRange:
+
+```d
+import std.algorithm : equal;
+import juptune.http  : uriDecoder;
+
+const encoded = "some%20string";
+const expected = "some string";
+
+assert(encoded.uriDecoder.equal(expected));
+```

@@ -1,0 +1,41 @@
+---
+title: TLS
+description: A reference page going over Juptune's TLS implementation.
+---
+
+import { Aside } from "@astrojs/starlight/components"
+
+Juptune provides a native implementation of TLS 1.3 - offloading the cryptography to both libsodium and OpenSSL (libsodium will be removed soon).
+
+Currently the socket can only act as a client. I'm not in too much of a rush to change this as generally you'll have external TLS termination in front of your server apps anyway.
+
+<Aside type="danger">
+    The implementation isn't 100% complete in terms of verifying server identities; doesn't support all common extensions; hasn't been verified by an external security audit, and is almost certainly insecure in some subtle and not-so-subtle ways, please DO NOT use this for anything serious.
+
+    I feel like it's gonna take an entire month of my life just getting a passable test suite thought up, let alone getting everything else sorted.
+</Aside>
+
+## TlsSocket
+
+I don't consider the API for `TlsSocket` very stable, so I'll refrain from documenting it in much detail for now.
+
+The code isn't as extensible as I originally envisioned, especially around adding support for extra algorithms.
+
+I hope that my planned rewrite of the `crypto` package will make things easier.
+
+### Supported Signature Algorithms
+
+* ECDSA-SECP256R1-SHA256
+* RSA-PSS-RSAE-SHA256
+
+More 256-bit algorithms can be added with a little bit of effort.
+
+Unfortunately a lot of the code currently hard-assumes the usage of a 256-bit algorithm.
+
+### Supported Key Exchange Algorithms
+
+* x25519
+
+### Supported Cipher Suites
+
+* TLS_CHACHA20_POLY1305_SHA256
